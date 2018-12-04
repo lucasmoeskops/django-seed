@@ -111,7 +111,10 @@ class ModelSeeder(object):
 
         def format_field(format, inserted_entities):
             if callable(format):
-                return format(inserted_entities, instance)
+                try:
+                    return format(inserted_entities, instance)
+                except TypeError:
+                    return format(inserted_entities)
             return format
 
         def turn_off_auto_add(model):
