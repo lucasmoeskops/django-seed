@@ -102,6 +102,47 @@ class ModelSeeder(object):
 
         return obj.pk
 
+    def repopulate(self, using, instance, inserted_entities):
+        """
+        Repopulate the given instance with random data
+        :param using:
+        :param inserted_entities:
+        """
+
+        def format_field(format, inserted_entities):
+            if callable(format):
+                try:
+                    return format(inserted_entities, instance)
+                except TypeError:
+                    return format(inserted_entities)
+            return format
+
+        def turn_off_auto_add(model):
+            for field in model._meta.fields:
+                if getattr(field, 'auto_now', False):
+                    field.auto_now = False
+                if getattr(field, 'auto_now_add', False):
+                    field.auto_now_add = False
+
+        manager = self.model.objects.db_manager(using=using)
+        turn_off_auto_add(manager.model)
+
+        faker_data = {
+            field: format_field(field_format, inserted_entities)
+            for field, field_format in self.field_formatters.items()
+        }
+
+        # max length restriction check
+        for data_field in faker_data:
+            field = self.model._meta.get_field(data_field)
+
+            if field.max_length and isinstance(faker_data[data_field], str):
+                faker_data[data_field] = faker_data[data_field][:field.max_length]
+
+        manager.filter(pk=instance.pk).update(**faker_data)
+
+        return instance.pk
+
 
 class Seeder(object):
     def __init__(self, faker):
@@ -112,8 +153,27 @@ class Seeder(object):
         self.entities = {}
         self.quantities = {}
         self.orders = []
+        self.instances = {}
 
-    def add_entity(self, model, number, customFieldFormatters=None):
+    def describe_entity(self, model, customFieldFormatters=None):
+        """
+        Add a description of how an entity should be formatted.
+
+        :param model:
+        :param customFieldFormatters:
+        :return:
+        """
+        if not isinstance(model, ModelSeeder):
+            model = ModelSeeder(model)
+
+        model.field_formatters = model.guess_field_formatters(self.faker)
+        if customFieldFormatters:
+            model.field_formatters.update(customFieldFormatters)
+
+        klass = model.model
+        self.entities[klass] = model
+
+    def add_entity(self, model, number):
         """
         Add an order for the generation of $number records for $entity.
 
@@ -122,21 +182,29 @@ class Seeder(object):
         :type model: Model
         :param number: int The number of entities to seed
         :type number: integer
-        :param customFieldFormatters: optional dict with field as key and 
-        callable as value
-        :type customFieldFormatters: dict or None
         """
         if not isinstance(model, ModelSeeder):
             model = ModelSeeder(model)
 
-        model.field_formatters = model.guess_field_formatters(self.faker)
-        if customFieldFormatters:
-            model.field_formatters.update(customFieldFormatters)
-        
+        if not model.field_formatters:
+            model.field_formatters = model.guess_field_formatters(self.faker)
+
         klass = model.model
         self.entities[klass] = model
         self.quantities[klass] = number
         self.orders.append(klass)
+
+    def add_instance(self, instance):
+        klass = instance.__class__
+        model = ModelSeeder(klass)
+
+        if klass not in self.entities:
+            self.add_entity(model, 0)
+
+        if klass not in self.instances:
+            self.instances[klass] = []
+
+        self.instances[klass].append(instance)
 
     def execute(self, using=None):
         """
@@ -155,6 +223,9 @@ class Seeder(object):
                 inserted_entities[klass] = []
             for i in range(0, number):
                 entity = self.entities[klass].execute(using, inserted_entities)
+                inserted_entities[klass].append(entity)
+            for instance in self.instances[klass]:
+                entity = self.entities[klass].repopulate(using, instance, inserted_entities)
                 inserted_entities[klass].append(entity)
 
         return inserted_entities
